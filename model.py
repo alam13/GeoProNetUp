@@ -122,3 +122,21 @@ class Net_coor_cent(_GeoBase):
         else:
             pooled = global_mean_pool(h, batch)
         return self.out(pooled)
+
+
+class Net_coor_torsion(_GeoBase):
+    """Joint head: coordinate displacement + node torsion logits."""
+    def __init__(self, in_channels, args):
+        super().__init__(in_channels, args, out_channels=3)
+        hidden = args.d_graph_layer
+        self.torsion_head = nn.Sequential(
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, x, edge_index, edge_attr, batch=None, flexible_idx=None):
+        h = self.encode(x, edge_index, edge_attr)
+        coor_delta = self.out(h)
+        torsion_node = self.torsion_head(h).squeeze(-1)
+        return coor_delta, torsion_node
