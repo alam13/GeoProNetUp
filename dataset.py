@@ -365,7 +365,7 @@ class PDBBindCoor(InMemoryDataset):
                     x = torch.Tensor(features)
                     y = torch.Tensor(labels)
                     bonds = torch.Tensor(bonds)
-                    dist = dist.reshape(dist.size()[0], 3)
+                    dist = dist.reshape(dist.size()[0], -1)
                     # flexible_idx = torch.tensor([(F.mse_loss(x[i][-3:], y[i]).item() > 0.000000001) for i in range(y.size()[0])])
                     flexible_idx = torch.tensor(torch.LongTensor(range(features.shape[0])) < flexible_len[0])
                     # flexible_idy = torch.tensor(torch.LongTensor(range(y.size()[0])) < flexible_len[0])
@@ -828,7 +828,7 @@ class PDBBindScreen(InMemoryDataset):
 
                     x = torch.Tensor(features)
                     dist = torch.tensor(dist, dtype=torch.float)
-                    dist = dist.reshape(dist.size()[0], 3)
+                    dist = dist.reshape(dist.size()[0], -1)
                     indptr = torch.LongTensor(indptr)
                     indices = torch.LongTensor(indices)
                     row_idx = torch.ops.torch_sparse.ind2ptr(indptr,len(indices))[1:]
@@ -1014,7 +1014,7 @@ class PDBBindScreen2(InMemoryDataset):
 
                     x = torch.Tensor(features)
                     dist = torch.tensor(dist, dtype=torch.float)
-                    dist = dist.reshape(dist.size()[0], 3)
+                    dist = dist.reshape(dist.size()[0], -1)
                     indptr = torch.LongTensor(indptr)
                     indices = torch.LongTensor(indices)
                     row_idx = torch.ops.torch_sparse.ind2ptr(indptr,len(indices))[1:]
