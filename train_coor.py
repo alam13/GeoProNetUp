@@ -13,6 +13,7 @@ import sys
 import os
 import argparse
 import math
+import json
 import numpy as np
 from time import time 
 from tqdm import tqdm
@@ -72,6 +73,7 @@ parser.add_argument("--use_alpha_channel", help="concatenate alpha_ijk edge side
 parser.add_argument("--metrics_file", help="path to epoch-level metrics jsonl", type=str, default='none')
 parser.add_argument("--metrics_per_complex_file", help="path to per-complex metrics jsonl", type=str, default='none')
 
+
 args = parser.parse_args()
 print(args)
 
@@ -79,6 +81,7 @@ if args.use_novel_features and args.edge_dim != 13 and not args.use_alpha_channe
     raise ValueError("GeoProNet novel mode expects --edge_dim=13. If you enable --use_alpha_channel then use --edge_dim=14.")
 if args.use_novel_features and args.use_alpha_channel and args.edge_dim != 14:
     raise ValueError("GeoProNet novel+alpha mode expects --edge_dim=14.")
+
 if args.atomwise:
     args.batch_size = 1
 
@@ -191,7 +194,7 @@ elif args.model_type == 'Net_coor_torsion':
     model = Net_coor_torsion(train_dataset.num_features, args).to(device)
 
 if args.pre_model != 'None':
-    model = torch.load(args.pre_model, map_location=device_str).to(device)
+    model = torch.load(args.pre_model, map_location=device_str, weights_only=False).to(device)
 # loss_op = torch.nn.MSELoss()
 
 #model.double()
