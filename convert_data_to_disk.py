@@ -28,6 +28,7 @@ parser.add_argument("--label_list_file", help="the path to label files", type=st
 parser.add_argument("--input_list", help="list of train/test pdbs", type=str, default='data/pdb_list_')
 parser.add_argument("--groundtruth_dir", help="the path to the ground truth pose pdbbind files", type=str, default='data/pdbbind/')
 parser.add_argument("--dataset", help="type of dataset", type=str, default='coor2')
+parser.add_argument("--use_novel_features", help="enable expanded directional/torsion edge features", default=False, action='store_true')
 parser.add_argument("--pdb_version", help="version of pdbbind", type=int, default = 2016)
 parser.add_argument("--muv_target", help="target id of muv data", type=str, default='466')
 parser.add_argument("--muv_label", help="which label of the muv data", type=str, default='decoy')
@@ -81,7 +82,8 @@ def srand_data_load_save_coord2_thread(input_list, groundtruth_dir, pdbbind_dir,
                                                    tile_size,
                                                    bond_th,
                                                    pocket_th,
-                                                   start, end)
+                                                   start, end,
+                                                   use_novel_features=args.use_novel_features)
     
 
 def srand_data_load_save_coord2(input_list, groundtruth_dir, pdbbind_dir, output_dir, resolution, bond_th, pocket_th, iteration, thread_num = 1):
@@ -173,7 +175,8 @@ def srand_data_load_save_casf_thread(input_list, groundtruth_dir, pdbbind_dir, c
                                                            tile_size,
                                                            bond_th,
                                                            pocket_th,
-                                                           start, end)
+                                                           start, end,
+                                                           use_novel_features=args.use_novel_features)
     
 
 def srand_data_load_save_casf(input_list, groundtruth_dir, pdbbind_dir, casf_groundtruth_dir, casf_dir, output_dir,
