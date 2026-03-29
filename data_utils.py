@@ -7,6 +7,14 @@ from networkx.readwrite import json_graph
 import json
 from scipy.spatial import distance
 
+from novel_geometry import (
+    build_ligand_adjacency,
+    local_torsion_stats,
+    rbf_expand,
+    unit_vector,
+)
+
+
 SPACE = 100.0
 COV_BOND_TH = 2.5
 
@@ -194,6 +202,9 @@ def gen_3D_2_pose(protein, ligand, Atoms, Bonds, bond_th, file_dir):
 
     assert node_id == len(nodes)
 
+    coords = np.asarray([feat[-3:] for feat in feats], dtype=np.float32)
+    ligand_adj = build_ligand_adjacency(edge_gt, ligand_nodes) if use_novel_features else {}
+
     tot = 0
     for i in nodes:
         for j in nodes:
@@ -218,7 +229,13 @@ def gen_3D_2_pose(protein, ligand, Atoms, Bonds, bond_th, file_dir):
                 else:
                     edges.append(j)
                     tot += 1
-                    dist.append([0.0, dis, 0.0])
+                    if use_novel_features:
+                        delta = coords[j] - coords[i]
+                        uvec = unit_vector(delta)
+                        rbf = rbf_expand(dis, rbf_centers)
+                        dist.append([0.0, dis, 0.0, *uvec.tolist(), 0.0, 1.0, *rbf.tolist()])
+                    else:
+                        dist.append([0.0, dis, 0.0])
         node_index.append(tot)
     
     with open(file_dir+"_data-G.json", 'a') as f:
@@ -235,7 +252,17 @@ def gen_3D_2_pose(protein, ligand, Atoms, Bonds, bond_th, file_dir):
     return len(nodes)
 
 
-def gen_3D_2_pose_atomwise(protein, ligand, Atoms, Bonds, edge_gt, bond_th, file_dir):
+def gen_3D_2_pose_atomwise(
+    protein,
+    ligand,
+    Atoms,
+    Bonds,
+    edge_gt,
+    bond_th,
+    file_dir,
+    use_novel_features=False,
+    rbf_centers=(0.02, 0.04, 0.06, 0.08, 0.10),
+):
     """ Convert a pose with pdb format to graph format. 
     """
     
@@ -279,6 +306,9 @@ def gen_3D_2_pose_atomwise(protein, ligand, Atoms, Bonds, edge_gt, bond_th, file
 
     assert node_id == len(nodes)
 
+    coords = np.asarray([feat[-3:] for feat in feats], dtype=np.float32)
+    ligand_adj = build_ligand_adjacency(edge_gt, ligand_nodes) if use_novel_features else {}
+
     tot = 0
     for i in nodes:
         for j in nodes:
@@ -294,17 +324,36 @@ def gen_3D_2_pose_atomwise(protein, ligand, Atoms, Bonds, edge_gt, bond_th, file
                     if (i, j) in edge_gt:
                         edges.append(j)
                         tot += 1
-                        dist.append([dis, 0.0, 0.0])
+                        if use_novel_features:
+                            delta = coords[j] - coords[i]
+                            uvec = unit_vector(delta)
+                            tors_sin, tors_cos = local_torsion_stats(i, j, coords, ligand_adj)
+                            rbf = rbf_expand(dis, rbf_centers)
+                            dist.append([dis, 0.0, 0.0, *uvec.tolist(), tors_sin, tors_cos, *rbf.tolist()])
+                        else:
+                            dist.append([dis, 0.0, 0.0])
                         # TODO: covalent bond
                 elif i >= ligand_nodes and j >= ligand_nodes:
                     if dis *SPACE < COV_BOND_TH:
                         edges.append(j)
                         tot += 1
-                        dist.append([0.0, 0.0, dis])
+                        if use_novel_features:
+                            delta = coords[j] - coords[i]
+                            uvec = unit_vector(delta)
+                            rbf = rbf_expand(dis, rbf_centers)
+                            dist.append([0.0, 0.0, dis, *uvec.tolist(), 0.0, 1.0, *rbf.tolist()])
+                        else:
+                            dist.append([0.0, 0.0, dis])
                 else:
                     edges.append(j)
                     tot += 1
-                    dist.append([0.0, dis, 0.0])
+                    if use_novel_features:
+                        delta = coords[j] - coords[i]
+                        uvec = unit_vector(delta)
+                        rbf = rbf_expand(dis, rbf_centers)
+                        dist.append([0.0, dis, 0.0, *uvec.tolist(), 0.0, 1.0, *rbf.tolist()])
+                    else:
+                        dist.append([0.0, dis, 0.0])
         node_index.append(tot)
     
     with open(file_dir+"_data-G.json", 'a') as f:
