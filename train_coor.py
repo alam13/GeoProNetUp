@@ -66,7 +66,8 @@ parser.add_argument("--lambda_steric", help="weight for steric clash penalty", t
 parser.add_argument("--steric_cutoff", help="minimum allowed inter-atomic distance (normalized by SPACE)", type=float, default=0.02)
 parser.add_argument("--lambda_torsion", help="weight for torsion smoothness regularization", type=float, default=0.02)
 parser.add_argument("--use_novel_features", help="expect 13D edge features from novel data path", default=False, action='store_true')
-
+parser.add_argument("--lambda_dihedral", help="weight for direct dihedral supervision", type=float, default=0.1)
+parser.add_argument("--torsion_iters", help="number of iterative torsion updates", type=int, default=1)
 
 args = parser.parse_args()
 print(args)
@@ -161,7 +162,7 @@ device = torch.device(device_str)
 print('cuda' if torch.cuda.is_available() else 'cpu')
 # model = Net(train_datasets[0].num_features, train_datasets[0].num_classes, args).to(device)
 
-from model import Net_coor, Net_coor_res, Net_coor_dir, Net_coor_len, Net_coor_cent
+from model import Net_coor, Net_coor_res, Net_coor_dir, Net_coor_len, Net_coor_cent, Net_coor_torsion
 
 if args.model_type == 'Net_coor_res':
     model = Net_coor_res(train_dataset.num_features, args).to(device)
@@ -178,6 +179,8 @@ elif args.model_type == 'Net_coor_len':
     # assert args.class_dir
 elif args.model_type == 'Net_coor_cent':
     model = Net_coor_cent(train_dataset.num_features, args).to(device)
+elif args.model_type == 'Net_coor_torsion':
+    model = Net_coor_torsion(train_dataset.num_features, args).to(device)
 
 if args.pre_model != 'None':
     model = torch.load(args.pre_model, map_location=device_str).to(device)
@@ -226,7 +229,6 @@ def kabsch_align_torch(predicted, target):
     pred_centered = predicted - pred_centroid
     target_centered = target - target_centroid
 
-    
     h = pred_centered.transpose(0, 1) @ target_centered
     u, s, v_t = torch.linalg.svd(h)
     r = v_t.transpose(0, 1) @ u.transpose(0, 1)
@@ -261,7 +263,8 @@ def steric_clash_penalty(data, pred, flexible_mask):
     d = (pred_coor[src_idx] - pred_coor[dst_idx]).square().sum(dim=1).sqrt()
     penalty = torch.relu(args.steric_cutoff - d).square().mean()
     return penalty
-        
+
+
 def torsion_smoothness_penalty(data, pred, flexible_mask):
     """Approximate torsion regularization using ligand-ligand edge displacement smoothness."""
     src = data.edge_index[0]
@@ -276,18 +279,120 @@ def torsion_smoothness_penalty(data, pred, flexible_mask):
     return delta.norm(dim=1).mean()
 
 
-def geopronet_loss(data, pred, target, flexible_mask):
+def _bond_graph_from_data(data, flexible_mask):
+    if not hasattr(data, 'bonds'):
+        return {}
+    bonds = data.bonds.long()
+    graph = {}
+    for row in bonds:
+        if row.numel() < 2:
+            continue
+        i, j = int(row[0].item()), int(row[1].item())
+        if i >= flexible_mask.size(0) or j >= flexible_mask.size(0):
+            continue
+        if not (bool(flexible_mask[i]) and bool(flexible_mask[j])):
+            continue
+        graph.setdefault(i, set()).add(j)
+        graph.setdefault(j, set()).add(i)
+    return graph
+
+
+def _rotatable_bonds(graph):
+    ans = []
+    for i in graph:
+        for j in graph[i]:
+            if i < j and len(graph[i]) > 1 and len(graph[j]) > 1:
+                ans.append((i, j))
+    return ans
+
+
+def _dihedral_torch(a, b, c, d, eps=1e-8):
+    b1 = b - a
+    b2 = c - b
+    b3 = d - c
+    n1 = torch.cross(b1, b2)
+    n2 = torch.cross(b2, b3)
+    n1 = n1 / (torch.norm(n1) + eps)
+    n2 = n2 / (torch.norm(n2) + eps)
+    m1 = torch.cross(n1, b2 / (torch.norm(b2) + eps))
+    x = torch.dot(n1, n2)
+    y = torch.dot(m1, n2)
+    return torch.atan2(y, x)
+
+
+def _rotate_points(points, origin, axis, theta):
+    axis = axis / (torch.norm(axis) + 1e-8)
+    p = points - origin
+    c = torch.cos(theta)
+    s = torch.sin(theta)
+    cross = torch.cross(axis.expand_as(p), p, dim=1)
+    dot = (p * axis).sum(dim=1, keepdim=True)
+    rot = p * c + cross * s + axis * dot * (1 - c)
+    return rot + origin
+
+
+def apply_torsion_updates(coords, graph, delta_theta, iters=1):
+    out = coords.clone()
+    bonds = _rotatable_bonds(graph)
+    if len(bonds) == 0:
+        return out
+    for _ in range(max(1, iters)):
+        for i, j in bonds:
+            axis = out[j] - out[i]
+            downstream = [n for n in graph[j] if n != i]
+            if not downstream:
+                continue
+            idx = torch.tensor(downstream, dtype=torch.long, device=out.device)
+            theta = delta_theta[(i + j) // 2]
+            out[idx] = _rotate_points(out[idx], out[j], axis, theta)
+    return out
+
+
+def dihedral_supervision_loss(data, pred_abs, target_abs, flexible_mask, torsion_node):
+    graph = _bond_graph_from_data(data, flexible_mask)
+    bonds = _rotatable_bonds(graph)
+    if len(bonds) == 0:
+        return pred_abs.new_tensor(0.0)
+
+    losses = []
+    for i, j in bonds:
+        left = [n for n in graph[i] if n != j]
+        right = [n for n in graph[j] if n != i]
+        if not left or not right:
+            continue
+        u = left[0]
+        v = right[0]
+        p_ang = _dihedral_torch(pred_abs[u], pred_abs[i], pred_abs[j], pred_abs[v])
+        t_ang = _dihedral_torch(target_abs[u], target_abs[i], target_abs[j], target_abs[v])
+        diff = torch.atan2(torch.sin(p_ang - t_ang), torch.cos(p_ang - t_ang))
+        losses.append(diff.square())
+    if not losses:
+        return pred_abs.new_tensor(0.0)
+    return torch.stack(losses).mean()
+
+
+def geopronet_loss(data, pred, target, flexible_mask, torsion_node=None):
     aligned = kabsch_align_torch(pred, target)
     align_loss = F.l1_loss(aligned, target)
     coord_loss = F.mse_loss(pred, target)
     steric_loss = steric_clash_penalty(data, pred, flexible_mask)
     torsion_loss = torsion_smoothness_penalty(data, pred, flexible_mask)
+    dihedral_loss = pred.new_tensor(0.0)
+
+    if torsion_node is not None:
+        start = data.x[flexible_mask, -3:]
+        pred_abs = start + pred
+        target_abs = start + target
+        graph = _bond_graph_from_data(data, flexible_mask)
+        pred_abs = apply_torsion_updates(pred_abs, graph, torsion_node[flexible_mask], args.torsion_iters)
+        dihedral_loss = dihedral_supervision_loss(data, pred_abs, target_abs, flexible_mask, torsion_node)
 
     total = (
         args.lambda_align * align_loss
         + args.lambda_coord * coord_loss
         + args.lambda_steric * steric_loss
         + args.lambda_torsion * torsion_loss
+        + args.lambda_dihedral * dihedral_loss
     )
     return total
 
@@ -369,12 +474,16 @@ def train():
 
             optimizer.zero_grad()
             if args.flexible:
-
+                torsion_node = None
                 if args.model_type != 'Net_coor_cent':
                     
                 
                     
-                    pred = model(data.x.to(device).float(), data.edge_index, data.dist.float())[data.flexible_idx.bool()]
+                    if args.model_type == 'Net_coor_torsion':
+                        pred_all, torsion_node = model(data.x.to(device).float(), data.edge_index, data.dist.float())
+                        pred = pred_all[data.flexible_idx.bool()]
+                    else:
+                        pred = model(data.x.to(device).float(), data.edge_index, data.dist.float())[data.flexible_idx.bool()]
                     
 
                     #if epoch ==150 or epoch == 250:
@@ -412,7 +521,9 @@ def train():
                 else:
                     
                     target = data.y[data.flexible_idx.bool()].to(device).float()
-                    loss = geopronet_loss(data, pred.to(device).float(), target, data.flexible_idx.bool())
+                    torsion_node = torsion_node if args.model_type == 'Net_coor_torsion' else None
+                    loss = geopronet_loss(data, pred.to(device).float(), target, data.flexible_idx.bool(), torsion_node=torsion_node)
+
                     
 
 
@@ -505,7 +616,12 @@ def test(loader, epoch):
             print(f"num_flexible_atoms: {num_flexible_atoms}, data.x.size: {data.x.size()[0]}, data.y.size: {num_atoms}")
         if args.flexible:
             if args.model_type != 'Net_coor_cent':
-                out = model(data.x.to(device).float(), data.edge_index.to(device), data.dist.to(device).float())[data.flexible_idx.bool()]
+                                if args.model_type == 'Net_coor_torsion':
+                    out_all, torsion_node = model(data.x.to(device).float(), data.edge_index.to(device), data.dist.to(device).float())
+                    out = out_all[data.flexible_idx.bool()]
+                else:
+                    torsion_node = None
+                    out = model(data.x.to(device).float(), data.edge_index.to(device), data.dist.to(device).float())[data.flexible_idx.bool()]
                 
                 #out = _dir_2_coor(out, args.step_len)
                 #out = _dir_2_coor2(out, args.step_len)
@@ -539,7 +655,13 @@ def test(loader, epoch):
 
             else:
                 target = data.y[data.flexible_idx.bool()].to(device).float()
-                loss = geopronet_loss(data.to(device), out.to(device).float(), target, data.flexible_idx.bool().to(device))
+                loss = geopronet_loss(
+                    data.to(device),
+                    out.to(device).float(),
+                    target,
+                    data.flexible_idx.bool().to(device),
+                    torsion_node=torsion_node,
+                )
             A= torch.tensor(out,requires_grad=True)
             A = A.cpu().detach().numpy()
             B= torch.tensor(data.y, requires_grad=True)
