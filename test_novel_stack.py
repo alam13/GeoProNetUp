@@ -12,6 +12,7 @@ class TestNovelStack(unittest.TestCase):
         self.assertIn('expects --edge_dim=13', txt)
         self.assertIn('expects --edge_dim=14', txt)
         self.assertIn('target = data.y.to(device).float()', txt)
+        self.assertIn('predicted = predicted.float()', txt)
 
     def test_edge_dims_baseline_and_novel(self):
         if importlib.util.find_spec('numpy') is None:
