@@ -236,6 +236,12 @@ def bond_dist(data, pred, fix_idx):
 
 def kabsch_align_torch(predicted, target):
     """Align predicted coordinates to target with Kabsch (differentiable torch path)."""
+    # SVD kernels used in Kabsch are not implemented for fp16 on some CUDA paths.
+    # Force fp32 math here (safe under autocast), then cast back.
+    in_dtype = predicted.dtype
+    predicted = predicted.float()
+    target = target.float()
+
     pred_centroid = predicted.mean(dim=0, keepdim=True)
     target_centroid = target.mean(dim=0, keepdim=True)
 
@@ -253,7 +259,7 @@ def kabsch_align_torch(predicted, target):
 
     t = target_centroid.transpose(0, 1) - r @ pred_centroid.transpose(0, 1)
     aligned = (r @ predicted.transpose(0, 1) + t).transpose(0, 1)
-    return aligned
+    return aligned.to(in_dtype)
 
 
 def steric_clash_penalty(data, pred, flexible_mask):
