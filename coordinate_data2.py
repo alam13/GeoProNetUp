@@ -22,7 +22,8 @@ def _write_gt_pose_to_file(file_dir, flexible_len, gt_pose, edge_gt, pdb):
 
 
 def _pdb_file_to_pose(pdb, pdb_file, Atoms, Bonds, bond_th, protein_gt, tot, tile_size,
-                      global_tot, output_dir, gt_pose, ligand_gt, edge_gt, file_counter):
+                      global_tot, output_dir, gt_pose, ligand_gt, edge_gt, file_counter,
+                      use_novel_features=False):
     """
     generate poses
     """
@@ -39,7 +40,16 @@ def _pdb_file_to_pose(pdb, pdb_file, Atoms, Bonds, bond_th, protein_gt, tot, til
             if this_pose_energy < min_energy:
                 min_energy = this_pose_energy
         if (ss[0] == 'ENDMDL'):
-            num_nodes = gen_3D_2_pose_atomwise(protein_gt, ligand, Atoms, Bonds, edge_gt, bond_th, output_dir+"/"+str(file_counter))
+            num_nodes = gen_3D_2_pose_atomwise(
+                protein_gt,
+                ligand,
+                Atoms,
+                Bonds,
+                edge_gt,
+                bond_th,
+                output_dir+"/"+str(file_counter),
+                use_novel_features=use_novel_features,
+            )
 
             if num_nodes != len(gt_pose) + len(protein_gt):
                 print(f"pose has {num_nodes} nodes while gt has {len(gt_pose)} nodes. protein_gt {pdb_file[-8:-4]},  {len(ligand_gt)}")
@@ -117,7 +127,8 @@ def read_pdbbind_to_disk_rmsd_energy_split(input_list,
                                            pocket_th,
                                            pdb_id_st,
                                            pdb_id_ed,
-                                           seed = None):
+                                           seed = None,
+                                           use_novel_features=False):
     
     rec_list = []
     label_list = []
@@ -172,8 +183,11 @@ def read_pdbbind_to_disk_rmsd_energy_split(input_list,
         pdb = pdb_list[i]
         gt_pose, protein_gt, ligand_gt, edge_gt = file_to_gt_pose(groundtruth_dir, groundtruth_suffix, pdb, Atoms, Bonds, pocket_th)
         pdb_file = os.path.join(pdbbind_dir, pdb+'.pdb')
-        tot, file_counter, global_tot = _pdb_file_to_pose(pdb, pdb_file, Atoms, Bonds, bond_th, protein_gt, tot, tile_size,
-                                                          global_tot, output_dir, gt_pose, ligand_gt, edge_gt, file_counter)
+        tot, file_counter, global_tot = _pdb_file_to_pose(
+            pdb, pdb_file, Atoms, Bonds, bond_th, protein_gt, tot, tile_size,
+            global_tot, output_dir, gt_pose, ligand_gt, edge_gt, file_counter,
+            use_novel_features=use_novel_features,
+        )
         pbar.update(1)
     pbar.close()
 
