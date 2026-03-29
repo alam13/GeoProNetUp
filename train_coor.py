@@ -158,9 +158,11 @@ def _dir_2_coor2(out, length):
 
     return ans*length
 
+
 def _dir_2_coor(out, length):
     """Backward-compatible alias used by legacy atomwise branch."""
     return _dir_2_coor2(out, length)
+
 
 
 
@@ -424,7 +426,6 @@ def geopronet_loss(data, pred, target, flexible_mask, torsion_node=None):
     return total
 
 
-
 from torch_geometric.utils import add_self_loops
 def build_edge_attr(data):
     edge_attr = data.dist.float()
@@ -509,9 +510,6 @@ def train():
             if args.flexible:
                 torsion_node = None
                 if args.model_type != 'Net_coor_cent':
-                    
-                
-                    
                     if args.model_type == 'Net_coor_torsion':
                         edge_attr = build_edge_attr(data)
                         pred_all, torsion_node = model(data.x.to(device).float(), data.edge_index, edge_attr)
@@ -519,6 +517,10 @@ def train():
                     else:
                         edge_attr = build_edge_attr(data)
                         pred = model(data.x.to(device).float(), data.edge_index, edge_attr)[data.flexible_idx.bool()]
+                    
+                
+                    
+                    
 
                     #if epoch ==150 or epoch == 250:
                         #updated_data = update_input_data(data.clone(), pred.cpu().detach())
@@ -532,20 +534,20 @@ def train():
                 
                    
                 if args.class_dir:
-                    y = data.y[data.flexible_idx.bool()].gt(0).long()
+                    y = data.y.gt(0).long()
                     y = y[:, 0] * 4 + y[:, 1] * 2 + y[:, 2]
                     loss = loss_op(pred, y)
                 elif args.loss == 'CosineEmbeddingLoss':
-                    loss = loss_op(pred, data.y[data.flexible_idx.bool()], cos_target)
+                    loss = loss_op(pred, data.y, cos_target)
                 elif args.loss == 'CosineAngle':
-                    loss = loss_op(pred, data.y[data.flexible_idx.bool()])
+                    loss = loss_op(pred, data.y)
                 elif args.model_type == 'Net_coor_len':
-                    length = data.y[data.flexible_idx.bool()].square().sum(1).sqrt().reshape(pred.size()[0],1)
+                    length = data.y.square().sum(1).sqrt().reshape(pred.size()[0],1)
                     loss = loss_op(pred, length)
                 elif args.model_type == 'Net_coor_cent':
                     edge_attr = build_edge_attr(data)
                     pred = model(data.x, data.edge_index, edge_attr, data.batch, data.flexible_idx.bool())
-                    y = global_mean_pool(data.y[data.flexible_idx.bool()], data.batch[data.flexible_idx.bool()])
+                    y = global_mean_pool(data.y, data.batch[data.flexible_idx.bool()])
                     loss = loss_op(pred, y)
                 elif args.hinge != 0:
                     fix_idx = (data.dist[:, 0] != 0).nonzero(as_tuple=True)[0]
@@ -555,10 +557,10 @@ def train():
                     loss = loss_op(pred, data.y) + loss1 * hinge
                 else:
                     
-                    target = data.y[data.flexible_idx.bool()].to(device).float()
+                    target = data.y.to(device).float()
                     torsion_node = torsion_node if args.model_type == 'Net_coor_torsion' else None
                     loss = geopronet_loss(data, pred.to(device).float(), target, data.flexible_idx.bool(), torsion_node=torsion_node)
-                    
+
 
 
             else:
@@ -659,6 +661,7 @@ def test(loader, epoch):
                     torsion_node = None
                     edge_attr = build_edge_attr(data.to(device))
                     out = model(data.x.to(device).float(), data.edge_index.to(device), edge_attr)[data.flexible_idx.bool()]
+                
                                 
                 
                 #out = _dir_2_coor(out, args.step_len)
@@ -674,17 +677,17 @@ def test(loader, epoch):
                 tn += y.size()[0]
                 #out = _dir_2_coor(out, args.step_len)
             elif args.loss == 'CosineEmbeddingLoss':
-                loss = loss_op(out, data.y.to(device)[data.flexible_idx.bool()], cos_target)
+                loss = loss_op(out, data.y.to(device), cos_target)
             elif args.loss == 'CosineAngle':
-                loss = (1 - loss_op2(out, data.y.to(device)[data.flexible_idx.bool()], cos_target)).acos().sum()
+                loss = (1 - loss_op2(out, data.y.to(device), cos_target)).acos().sum()
             elif args.model_type == 'Net_coor_len':
-                length = data.y.to(device)[data.flexible_idx.bool()].square().sum(1).sqrt().reshape(out.size()[0],1)
+                length = data.y.to(device).square().sum(1).sqrt().reshape(out.size()[0],1)
                 loss = loss_op(out, length)
-                out = data.y.to(device)[data.flexible_idx.bool()]
+                out = data.y.to(device)
             elif args.model_type == 'Net_coor_cent':
                 edge_attr = build_edge_attr(data.to(device))
                 pred = model(data.x.to(device), data.edge_index.to(device), edge_attr, data.batch.to(device), data.flexible_idx.bool().to(device)).cpu()
-                y = global_mean_pool(data.y[data.flexible_idx.bool()], data.batch[data.flexible_idx.bool()])
+                y = global_mean_pool(data.y, data.batch[data.flexible_idx.bool()])
                 loss = loss_op(pred, y)
                 out = pred.repeat(num_flexible_atoms, 1)
             elif args.hinge != 0:
@@ -694,7 +697,7 @@ def test(loader, epoch):
                 loss = loss_op(out, data.y.to(device)) + loss1 * args.hinge
 
             else:
-                target = data.y[data.flexible_idx.bool()].to(device).float()
+                target = data.y.to(device).float()
                 loss = geopronet_loss(
                     data.to(device),
                     out.to(device).float(),
@@ -728,9 +731,9 @@ def test(loader, epoch):
 
         else: # not flexible
             edge_attr = build_edge_attr(data.to(device))
-            out = model(data.x.to(device), data.edge_index.to(device), edge_attr)
+            out = model(data.x.to(device), data.edge_index.to(device), edge_attr
             loss = loss_op(out, data.y.to(device)) 
-            rmsds = F.mse_loss(data.y[data.flexible_idx.bool()], out.cpu()[data.flexible_idx.bool()], reduction='sum').item()
+            rmsds = F.mse_loss(data.y, out.cpu()[data.flexible_idx.bool()], reduction='sum').item(
             total_rmsd += math.sqrt(rmsds / num_flexible_atoms)
             all_rmsds.append(math.sqrt(rmsds / num_flexible_atoms))
 
