@@ -62,6 +62,7 @@ def _compute_edge_alpha(edge_index, coords):
         alpha[e, 0] = torch.acos(cosang)
     return alpha
 
+
 class PDBBind(InMemoryDataset):
 
     def __init__(self, root, subset=False, split='train', transform=None,
