@@ -60,10 +60,19 @@ parser.add_argument("--hinge", help="rate of hinge loss", type=float, default = 
 parser.add_argument("--tot_seed", help="num of seeds in the dataset", type=int, default = 8)
 parser.add_argument("--hidden_dim", help="dimension of the hidden layer", type=int, default=256)
 parser.add_argument("--output_dim", help="dimension of the final output", type=int, default=3)
+parser.add_argument("--lambda_align", help="weight for transformation-normalized alignment loss", type=float, default=0.5)
+parser.add_argument("--lambda_coord", help="weight for direct coordinate regression loss", type=float, default=0.5)
+parser.add_argument("--lambda_steric", help="weight for steric clash penalty", type=float, default=0.05)
+parser.add_argument("--steric_cutoff", help="minimum allowed inter-atomic distance (normalized by SPACE)", type=float, default=0.02)
+parser.add_argument("--lambda_torsion", help="weight for torsion smoothness regularization", type=float, default=0.02)
+parser.add_argument("--use_novel_features", help="expect 13D edge features from novel data path", default=False, action='store_true')
 
 
 args = parser.parse_args()
 print(args)
+
+if args.use_novel_features and args.edge_dim != 13:
+    raise ValueError("GeoProNet novel mode expects --edge_dim=13. Please regenerate data with --use_novel_features and train with edge_dim=13.")
 
 if args.atomwise:
     args.batch_size = 1
@@ -209,27 +218,79 @@ def bond_dist(data, pred, fix_idx):
 
     return dist.sum(-1).sqrt()
 
-class NewLoss(torch.nn.Module):
-    def __init__(self, kabsch_weight=1.0, model_weight=1.0):
-        super(NewLoss, self).__init__()
-        self.kabsch_weight = kabsch_weight
-        self.model_weight = model_weight
+def kabsch_align_torch(predicted, target):
+    """Align predicted coordinates to target with Kabsch (differentiable torch path)."""
+    pred_centroid = predicted.mean(dim=0, keepdim=True)
+    target_centroid = target.mean(dim=0, keepdim=True)
 
-    def forward(self, predicted, groundtruth, kabsch_output):
-        
-        kabsch_loss = torch.mean(torch.abs(kabsch_output - groundtruth))
-        #kabsch_loss = torch.nn.MSELoss()(kabsch_output, groundtruth)
-        
-        model_loss = torch.nn.MSELoss()(predicted, groundtruth)
+    pred_centered = predicted - pred_centroid
+    target_centered = target - target_centroid
 
     
-        total_loss = self.kabsch_weight * kabsch_loss + self.model_weight * model_loss
+    h = pred_centered.transpose(0, 1) @ target_centered
+    u, s, v_t = torch.linalg.svd(h)
+    r = v_t.transpose(0, 1) @ u.transpose(0, 1)
+
+    if torch.det(r) < 0:
+        v_t = v_t.clone()
+        v_t[-1, :] *= -1
+        r = v_t.transpose(0, 1) @ u.transpose(0, 1)
+
+    t = target_centroid.transpose(0, 1) - r @ pred_centroid.transpose(0, 1)
+    aligned = (r @ predicted.transpose(0, 1) + t).transpose(0, 1)
+    return aligned
+
+
+def steric_clash_penalty(data, pred, flexible_mask):
+    """Soft physical constraint: penalize short ligand-protein contacts."""
+    if data.dist.size(0) == 0:
+        return pred.new_tensor(0.0)
+
+    src = data.edge_index[0]
+    dst = data.edge_index[1]
+    ligand_to_protein = flexible_mask[src] & (~flexible_mask[dst])
+    if ligand_to_protein.sum() == 0:
+        return pred.new_tensor(0.0)
+
+    src_idx = src[ligand_to_protein]
+    dst_idx = dst[ligand_to_protein]
+
+    pred_coor = data.x[:, -3:].clone()
+    pred_coor[flexible_mask] = pred
+
+    d = (pred_coor[src_idx] - pred_coor[dst_idx]).square().sum(dim=1).sqrt()
+    penalty = torch.relu(args.steric_cutoff - d).square().mean()
+    return penalty
         
+def torsion_smoothness_penalty(data, pred, flexible_mask):
+    """Approximate torsion regularization using ligand-ligand edge displacement smoothness."""
+    src = data.edge_index[0]
+    dst = data.edge_index[1]
+    ligand_edge = flexible_mask[src] & flexible_mask[dst]
+    if ligand_edge.sum() == 0:
+        return pred.new_tensor(0.0)
 
-        return total_loss
+    src = src[ligand_edge]
+    dst = dst[ligand_edge]
+    delta = pred[src] - pred[dst]
+    return delta.norm(dim=1).mean()
 
 
-loss_fn = NewLoss(kabsch_weight=0.5, model_weight=0.5)
+def geopronet_loss(data, pred, target, flexible_mask):
+    aligned = kabsch_align_torch(pred, target)
+    align_loss = F.l1_loss(aligned, target)
+    coord_loss = F.mse_loss(pred, target)
+    steric_loss = steric_clash_penalty(data, pred, flexible_mask)
+    torsion_loss = torsion_smoothness_penalty(data, pred, flexible_mask)
+
+    total = (
+        args.lambda_align * align_loss
+        + args.lambda_coord * coord_loss
+        + args.lambda_steric * steric_loss
+        + args.lambda_torsion * torsion_loss
+    )
+    return total
+
 
 
 from torch_geometric.utils import add_self_loops
@@ -350,23 +411,8 @@ def train():
                     loss = loss_op(pred, data.y) + loss1 * hinge
                 else:
                     
-                    A= torch.tensor(pred,requires_grad=True)
-                    A = A.cpu().detach().numpy()
-                
-                    B= torch.tensor(data.y, requires_grad=True)
-                    B = B.cpu().detach().numpy()
-                    
-                    R,b = Kabsch_3D(A.T, B.T)
-                    complex_pred = ((R @ A.T) + b).T                    
-                    
-                    B = torch.tensor(B,requires_grad = True)
-                    complex_pred = torch.tensor(complex_pred, requires_grad=True)
-                    
-                    
-                    loss = loss_fn(pred.to(device).float(), data.y.to(device).float(), complex_pred.to(device).float())
-                    
-                    #loss = loss_op(pred.to(device).float(), data.y.to(device).float())
-                    #loss = loss_op(complex_pred.to(device).float(), B.to(device).float())
+                    target = data.y[data.flexible_idx.bool()].to(device).float()
+                    loss = geopronet_loss(data, pred.to(device).float(), target, data.flexible_idx.bool())
                     
 
 
@@ -492,7 +538,8 @@ def test(loader, epoch):
                 loss = loss_op(out, data.y.to(device)) + loss1 * args.hinge
 
             else:
-                loss = loss_op(out, data.y.to(device))
+                target = data.y[data.flexible_idx.bool()].to(device).float()
+                loss = geopronet_loss(data.to(device), out.to(device).float(), target, data.flexible_idx.bool().to(device))
             A= torch.tensor(out,requires_grad=True)
             A = A.cpu().detach().numpy()
             B= torch.tensor(data.y, requires_grad=True)
