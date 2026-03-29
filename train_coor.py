@@ -771,7 +771,10 @@ def test(loader, epoch):
     pbar.close()
     tt = time() - t
     print(f"Spend {tt}s")
-    print(f"x: {fpl}, all: {tn}")
+    if args.class_dir:
+        print(f"class_dir histogram x: {fpl}, all: {tn}")
+    else:
+        print("class_dir disabled: histogram counters are not used.")
     print([i / pose_idx for i in total_rmsds])
     print(avg_rmsd / pose_idx)
 
@@ -789,16 +792,22 @@ def test(loader, epoch):
     avg_rmsd_per_pdb_in = sum([r / d for r, d in zip(rmsd_per_pdb_in[:diff_complex], num_pose_per_pdb[:diff_complex])]) / diff_complex
     #return total_loss / pose_idx, avg_rmsd_per_pdb, avg_rmsd_per_pdb_in
     rmsd_arr = np.array(all_rmsds, dtype=np.float32) if len(all_rmsds) else np.array([0.0], dtype=np.float32)
+    rmsd_arr_A = rmsd_arr * SPACE
+    if epoch <= 1:
+        avg_rmsd_per_pdb_in = avg_rmsd_per_pdb_in * SPACE
+    else:
+        avg_rmsd_per_pdb_in = None
+
     metrics = {
         "val_loss": float(total_loss / pose_idx),
-        "rmsd_mean": float(rmsd_arr.mean()),
-        "rmsd_median": float(np.median(rmsd_arr)),
-        "rmsd_std": float(rmsd_arr.std()),
-        "rmsd_p90": float(np.percentile(rmsd_arr, 90)),
-        "sr_2a": float((rmsd_arr <= 2.0).mean()),
-        "sr_5a": float((rmsd_arr <= 5.0).mean()),
-        "avg_rmsd_per_complex": float(avg_rmsd_per_pdb),
-        "avg_input_rmsd_per_complex": float(avg_rmsd_per_pdb_in),
+        "rmsd_mean_A": float(rmsd_arr_A.mean()),
+        "rmsd_median_A": float(np.median(rmsd_arr_A)),
+        "rmsd_std_A": float(rmsd_arr_A.std()),
+        "rmsd_p90_A": float(np.percentile(rmsd_arr_A, 90)),
+        "sr_2a": float((rmsd_arr_A <= 2.0).mean()),
+        "sr_5a": float((rmsd_arr_A <= 5.0).mean()),
+        "avg_rmsd_per_complex_A": float(avg_rmsd_per_pdb * SPACE),
+        "avg_input_rmsd_per_complex_A": (float(avg_rmsd_per_pdb_in) if avg_rmsd_per_pdb_in is not None else None),
         "num_poses": int(pose_idx),
         "num_complexes": int(diff_complex),
         "avg_poses_per_complex": float(pose_idx / max(diff_complex, 1)),
@@ -810,8 +819,8 @@ def test(loader, epoch):
         per_complex.append({
             "pdb": str(pdbs[jj]) if jj < len(pdbs) else str(jj),
             "num_poses": int(num_pose_per_pdb[jj]),
-            "avg_rmsd": float(rmsd_per_pdb[jj] / denom),
-            "avg_input_rmsd": float(rmsd_per_pdb_in[jj] / denom),
+            "avg_rmsd_A": float((rmsd_per_pdb[jj] / denom) * SPACE),
+            "avg_input_rmsd_A": (float((rmsd_per_pdb_in[jj] / denom) * SPACE) if epoch <= 1 else None),
         })
 
     return metrics, per_complex
@@ -833,8 +842,8 @@ for epoch in range(args.start_epoch, args.start_epoch + args.epoch):
     #print(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd}")
     eval_metrics, per_complex_metrics = test(test_loader, epoch)
     loss2 = eval_metrics["val_loss"]
-    rmsd = eval_metrics["avg_rmsd_per_complex"]
-    rmsd_in = eval_metrics["avg_input_rmsd_per_complex"]
+    rmsd = eval_metrics["avg_rmsd_per_complex_A"]
+    rmsd_in = eval_metrics["avg_input_rmsd_per_complex_A"]
     print(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd} SR@2A: {eval_metrics['sr_2a']} SR@5A: {eval_metrics['sr_5a']}")
     #print(f"Epoch: {epoch} Proposed Loss: {ploss} Kabsch Loss: {kloss}  Model Loss: {mloss}")
     torch.cuda.empty_cache()
