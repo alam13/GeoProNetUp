@@ -13,6 +13,8 @@ class TestNovelStack(unittest.TestCase):
         self.assertIn('expects --edge_dim=14', txt)
         self.assertIn('target = data.y.to(device).float()', txt)
         self.assertIn('predicted = predicted.float()', txt)
+        self.assertIn('autocast(enabled=False)', txt)
+        self.assertIn('class_dir disabled: histogram counters are not used.', txt)
 
     def test_edge_dims_baseline_and_novel(self):
         if importlib.util.find_spec('numpy') is None:
