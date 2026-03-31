@@ -72,7 +72,11 @@ parser.add_argument("--torsion_iters", help="number of iterative torsion updates
 parser.add_argument("--use_alpha_channel", help="concatenate alpha_ijk edge side tensor into message passing edge_attr", default=False, action='store_true')
 parser.add_argument("--metrics_file", help="path to epoch-level metrics jsonl", type=str, default='none')
 parser.add_argument("--metrics_per_complex_file", help="path to per-complex metrics jsonl", type=str, default='none')
-
+parser.add_argument("--skip_nonfinite_batches", help="skip optimizer step for NaN/Inf loss batches", default=False, action='store_true')
+parser.add_argument("--use_lr_scheduler", help="enable ReduceLROnPlateau on validation loss", default=False, action='store_true')
+parser.add_argument("--lr_patience", help="epochs to wait before reducing LR", type=int, default=5)
+parser.add_argument("--lr_factor", help="multiplicative factor for LR reduction", type=float, default=0.5)
+parser.add_argument("--lr_min", help="minimum LR allowed by scheduler", type=float, default=1e-6)
 
 args = parser.parse_args()
 print(args)
@@ -222,6 +226,15 @@ if args.class_dir:
 hinge = torch.tensor([args.hinge]).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+scheduler = None
+if args.use_lr_scheduler:
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=args.lr_factor,
+        patience=args.lr_patience,
+        min_lr=args.lr_min,
+    )
 
 def bond_dist(data, pred, fix_idx):
     # print(data.x.size(), data.edge_index.size(), pred.size())
@@ -545,6 +558,7 @@ def train():
     total_loss2 = 0
     total_loss = 0
     tot = 0
+    skipped_nonfinite = 0
     t = time()
     pbar = tqdm(total=train_loader_size)
     pbar.set_description('Training poses...')
@@ -647,7 +661,10 @@ def train():
                 total_loss1 += loss.item() * args.batch_size
                 #total_loss2 += k_loss.item() * args.batch_size
                 #total_loss3 += m_loss.item() * args.batch_size
-        
+        if args.skip_nonfinite_batches and (not torch.isfinite(loss).all().item()):
+            skipped_nonfinite += 1
+            pbar.update(1)
+            continue
         loss.backward()
         
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -660,7 +677,7 @@ def train():
         # break
     pbar.close()
     
-    print(f"trained {tot} batches, take {time() - t}s")
+    print(f"trained {tot} batches, skipped_nonfinite {skipped_nonfinite}, take {time() - t}s")
     return total_loss1 / train_loader_size
 
 
@@ -925,24 +942,24 @@ for epoch in range(args.start_epoch, args.start_epoch + args.epoch):
     #print(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd}")
     eval_metrics, per_complex_metrics = test(test_loader, epoch)
     loss2 = eval_metrics["val_loss"]
+    if scheduler is not None:
+        scheduler.step(loss2)
+    current_lr = optimizer.param_groups[0]["lr"]
     rmsd = eval_metrics["avg_rmsd_per_complex_A"]
     rmsd_in = eval_metrics["avg_input_rmsd_per_complex_A"]
-    print(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd} SR@2A: {eval_metrics['sr_2a']} SR@5A: {eval_metrics['sr_5a']}")
+    print(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd} SR@2A: {eval_metrics['sr_2a']} SR@5A: {eval_metrics['sr_5a']} LR: {current_lr}")
     #print(f"Epoch: {epoch} Proposed Loss: {ploss} Kabsch Loss: {kloss}  Model Loss: {mloss}")
     torch.cuda.empty_cache()
     if epoch <= 1:
         print(f"Avg RMSD of inputs: {rmsd_in}")
         if args.output != 'none':
             with open(args.output, 'a') as f:
-                f.write(f"Avg RMSD of inputs: {rmsd_in}\n")
-    if args.output != 'none':
-        with open(args.output, 'a') as f:
-             f.write(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd} SR@2A: {eval_metrics['sr_2a']} SR@5A: {eval_metrics['sr_5a']}\n")
+                f.write(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd} SR@2A: {eval_metrics['sr_2a']} SR@5A: {eval_metrics['sr_5a']} LR: {current_lr}\n")
             #f.write(f"Epoch: {epoch} Proposed Loss: {ploss} Kabsch Loss: {kloss}  Model Loss: {mloss}\n")
     if args.metrics_file != 'none':
         os.makedirs(os.path.dirname(args.metrics_file), exist_ok=True) if os.path.dirname(args.metrics_file) else None
         with open(args.metrics_file, 'a') as mf:
-            payload = {"epoch": epoch, "train_loss": float(loss1), **eval_metrics}
+            payload = {"epoch": epoch, "train_loss": float(loss1), "lr": float(current_lr), **eval_metrics}
             mf.write(json.dumps(payload) + "\n")
     if args.metrics_per_complex_file != 'none':
         os.makedirs(os.path.dirname(args.metrics_per_complex_file), exist_ok=True) if os.path.dirname(args.metrics_per_complex_file) else None
@@ -950,8 +967,6 @@ for epoch in range(args.start_epoch, args.start_epoch + args.epoch):
             for row in per_complex_metrics:
                 row_payload = {"epoch": epoch, **row}
                 pf.write(json.dumps(row_payload) + "\n")
-            #f.write(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd}\n")
-            #f.write(f"Epoch: {epoch} Proposed Loss: {ploss} Kabsch Loss: {kloss}  Model Loss: {mloss}\n")
     if epoch > 3 and (min_rmsd > rmsd) :
         saved_model_dir = os.path.join(args.model_dir, f'model_{epoch}.pt')
         torch.save(model.state_dict(), saved_model_dir)
