@@ -290,7 +290,7 @@ def steric_clash_penalty(data, pred, flexible_mask):
     dst_idx = dst[ligand_to_protein]
 
     pred_coor = data.x[:, -3:].clone()
-    pred_coor[flexible_mask] = pred
+    pred_coor[flexible_mask] = data.x[flexible_mask, -3:] + pred
 
     d = (pred_coor[src_idx] - pred_coor[dst_idx]).square().sum(dim=1).sqrt()
     penalty = torch.relu(args.steric_cutoff - d).square().mean()
@@ -313,7 +313,7 @@ def clash_stats(data, pred, flexible_mask):
     src_idx = src[ligand_to_protein]
     dst_idx = dst[ligand_to_protein]
     pred_coor = data.x[:, -3:].clone()
-    pred_coor[flexible_mask] = pred
+    pred_coor[flexible_mask] = data.x[flexible_mask, -3:] + pred
     d = (pred_coor[src_idx] - pred_coor[dst_idx]).square().sum(dim=1).sqrt()
     clash_rate = (d < args.steric_cutoff).float().mean()
     clash_pen = torch.relu(args.steric_cutoff - d).square().mean()
