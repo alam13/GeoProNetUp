@@ -6,7 +6,7 @@ import torch.nn.functional as F
 from sklearn import metrics as sk_metrics
 
 from losses.geometric_losses import geopronet_loss, kabsch_align_torch
-from engine.train_loop import build_graph_inputs, ranking_targets
+from train_loop import build_graph_inputs, ranking_targets
 
 
 SPACE = 100.0
