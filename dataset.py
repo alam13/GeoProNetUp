@@ -430,7 +430,7 @@ class PDBBindCoor(InMemoryDataset):
                     bonds = torch.Tensor(bonds)
                     dist = dist.reshape(dist.size()[0], -1)
                     # flexible_idx = torch.tensor([(F.mse_loss(x[i][-3:], y[i]).item() > 0.000000001) for i in range(y.size()[0])])
-                    flexible_idx = torch.tensor(torch.LongTensor(range(features.shape[0])) < flexible_len[0])
+                    flexible_idx = torch.arange(features.shape[0], dtype=torch.long) < int(flexible_len[0])
                     # flexible_idy = torch.tensor(torch.LongTensor(range(y.size()[0])) < flexible_len[0])
                     flexible_len = torch.tensor(flexible_len)
                     # flexible_idx = torch.tensor(torch.LongTensor(range(features.shape[0])) < labels[1])
@@ -451,6 +451,9 @@ class PDBBindCoor(InMemoryDataset):
                     data.flexible_idx = flexible_idx
                     # data.flexible_idy = flexible_idy
                     data.flexible_len = flexible_len
+                    if y.dim() == 2 and y.size(1) > 3:
+                        data.pose_rmsd = y[:, 3].abs().mean().reshape(1)
+
 
                     if pose_rmsd is not None:
                         data.pose_rmsd = torch.tensor([pose_rmsd], dtype=torch.float)
@@ -948,7 +951,7 @@ class PDBBindScreen(InMemoryDataset):
                     # data.rmsd = torch.tensor([rmsds[idx]], dtype=torch.float)
                     # data.energy = torch.tensor([energies[idx]], dtype=torch.float)
                     data.dist = dist
-                    flexible_idx = torch.tensor(torch.LongTensor(range(features.shape[0])) < flexible)
+                    flexible_idx = torch.arange(features.shape[0], dtype=torch.long) < int(flexible)
                     data.flexible_idx = flexible_idx
                     if labels.shape[0] > 2:
                         energy = labels[2]
@@ -1154,7 +1157,7 @@ class PDBBindScreen2(InMemoryDataset):
                     # data.rmsd = torch.tensor([rmsds[idx]], dtype=torch.float)
                     # data.energy = torch.tensor([energies[idx]], dtype=torch.float)
                     data.dist = dist
-                    flexible_idx = torch.tensor(torch.LongTensor(range(features.shape[0])) < flexible)
+                    flexible_idx = torch.arange(features.shape[0], dtype=torch.long) < int(flexible)
                     data.flexible_idx = flexible_idx
                     if labels.shape[0] > 2:
                         energy = labels[2]
@@ -1167,6 +1170,8 @@ class PDBBindScreen2(InMemoryDataset):
                         data.lig_idx = torch.tensor([energy], dtype=torch.int)
                     bonds = torch.Tensor(bonds)
                     data.bonds = bonds
+                    if labels.shape[0] > 2:
+                        data.pose_rmsd = torch.tensor([float(labels[2])], dtype=torch.float)
                     if pose_rmsd is not None:
                         data.pose_rmsd = torch.tensor([pose_rmsd], dtype=torch.float)
                         
