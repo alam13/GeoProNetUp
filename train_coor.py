@@ -7,7 +7,7 @@ from torch_geometric.nn import GATConv, global_mean_pool
 from scipy.spatial import distance
 from sklearn.metrics import f1_score
 from sklearn.metrics import mean_squared_error
-from sklearn import metrics
+from sklearn import metrics as sk_metrics
 
 import sys
 import os
@@ -77,9 +77,20 @@ parser.add_argument("--use_lr_scheduler", help="enable ReduceLROnPlateau on vali
 parser.add_argument("--lr_patience", help="epochs to wait before reducing LR", type=int, default=5)
 parser.add_argument("--lr_factor", help="multiplicative factor for LR reduction", type=float, default=0.5)
 parser.add_argument("--lr_min", help="minimum LR allowed by scheduler", type=float, default=1e-6)
+parser.add_argument("--adaptive_loss_weights", help="learn loss-term weights during training", default=False, action='store_true')
+parser.add_argument("--radius_start", help="initial edge radius schedule cutoff in normalized coordinate units", type=float, default=0.0)
+parser.add_argument("--radius_end", help="final edge radius schedule cutoff in normalized coordinate units", type=float, default=0.0)
+parser.add_argument("--lambda_rank", help="weight for pose ranking auxiliary loss", type=float, default=0.1)
+parser.add_argument("--rank_good_th", help="RMSD(A) threshold to tag a pose as good for ranking", type=float, default=2.0)
+parser.add_argument("--seed", help="global random seed for reproducibility", type=int, default=42)
 
 args = parser.parse_args()
 print(args)
+
+torch.manual_seed(args.seed)
+np.random.seed(args.seed)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(args.seed)
 
 if args.use_novel_features and args.edge_dim != 13 and not args.use_alpha_channel:
     raise ValueError("GeoProNet novel mode expects --edge_dim=13. If you enable --use_alpha_channel then use --edge_dim=14.")
@@ -179,7 +190,7 @@ device = torch.device(device_str)
 print('cuda' if torch.cuda.is_available() else 'cpu')
 # model = Net(train_datasets[0].num_features, train_datasets[0].num_classes, args).to(device)
 
-from model import Net_coor, Net_coor_res, Net_coor_dir, Net_coor_len, Net_coor_cent, Net_coor_torsion
+from model import Net_coor, Net_coor_res, Net_coor_dir, Net_coor_len, Net_coor_cent, Net_coor_torsion, Net_coor_two_stage
 
 if args.model_type == 'Net_coor_res':
     model = Net_coor_res(train_dataset.num_features, args).to(device)
@@ -198,6 +209,8 @@ elif args.model_type == 'Net_coor_cent':
     model = Net_coor_cent(train_dataset.num_features, args).to(device)
 elif args.model_type == 'Net_coor_torsion':
     model = Net_coor_torsion(train_dataset.num_features, args).to(device)
+elif args.model_type == 'Net_coor_two_stage':
+    model = Net_coor_two_stage(train_dataset.num_features, args).to(device)
 
 if args.pre_model != 'None':
     model = torch.load(args.pre_model, map_location=device_str, weights_only=False).to(device)
@@ -224,7 +237,45 @@ if args.class_dir:
     assert args.model_type == 'Net_coor_dir'
 # loss_op_kld = torch.nn.KLDivLoss()
 hinge = torch.tensor([args.hinge]).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+rank_loss_op = torch.nn.BCEWithLogitsLoss()
+
+
+class AdaptiveGeoLoss(torch.nn.Module):
+    """
+    Uncertainty-weighted multi-objective loss.
+    Uses learned log variances to rebalance terms online.
+    """
+    def __init__(self, initial_weights):
+        super().__init__()
+        self.log_vars = torch.nn.ParameterDict({
+            key: torch.nn.Parameter(torch.log(torch.tensor(1.0 / max(weight, 1e-8), dtype=torch.float32)))
+            for key, weight in initial_weights.items()
+        })
+
+    def forward(self, losses):
+        total = 0.0
+        for key, loss_val in losses.items():
+            log_var = self.log_vars[key]
+            precision = torch.exp(-log_var)
+            total = total + precision * loss_val + log_var
+        return total
+
+
+adaptive_loss = None
+if args.adaptive_loss_weights:
+    adaptive_loss = AdaptiveGeoLoss({
+        "align": args.lambda_align,
+        "coord": args.lambda_coord,
+        "steric": args.lambda_steric,
+        "torsion": args.lambda_torsion,
+        "dihedral": args.lambda_dihedral,
+    }).to(device)
+
+opt_params = list(model.parameters())
+if adaptive_loss is not None:
+    opt_params += list(adaptive_loss.parameters())
+optimizer = torch.optim.Adam(opt_params, lr=args.lr)
+
 
 scheduler = None
 if args.use_lr_scheduler:
@@ -508,14 +559,87 @@ def geopronet_loss(data, pred, target, flexible_mask, torsion_node=None):
         + args.lambda_torsion * torsion_loss
         + args.lambda_dihedral * dihedral_loss
     )
+    if adaptive_loss is not None:
+        total = adaptive_loss({
+            "align": align_loss,
+            "coord": coord_loss,
+            "steric": steric_loss,
+            "torsion": torsion_loss,
+            "dihedral": dihedral_loss,
+        })
     return total
+def ranking_targets_from_displacement(data, target, flexible_mask):
+    if hasattr(data, "pose_rmsd"):
+        rmsd = data.pose_rmsd.float().view(-1)
+        if rmsd.numel() > 0:
+            return (rmsd <= args.rank_good_th).float()
+    if hasattr(data, 'batch'):
+        batch_full = data.batch
+    else:
+        batch_full = torch.zeros((data.x.size(0),), dtype=torch.long, device=target.device)
+    batch_flex = batch_full[flexible_mask]
+    num_graphs = int(batch_full.max().item()) + 1 if batch_full.numel() > 0 else 1
+    labels = []
+    for g in range(num_graphs):
+        idx = (batch_flex == g)
+        if idx.sum() == 0:
+            labels.append(target.new_tensor(0.0))
+            continue
+        rmsd = torch.sqrt(target[idx].square().sum(dim=1).mean()) * SPACE
+        labels.append((rmsd <= args.rank_good_th).float())
+    return torch.stack(labels)
+
+
+def rank_calibration_metrics(labels, probs, bins=10):
+    labels = np.array(labels, dtype=np.float32)
+    probs = np.array(probs, dtype=np.float32)
+    if labels.size == 0:
+        return None, None
+    brier = float(np.mean((probs - labels) ** 2))
+    edges = np.linspace(0.0, 1.0, bins + 1)
+    ece = 0.0
+    for i in range(bins):
+        lo, hi = edges[i], edges[i + 1]
+        mask = (probs >= lo) & (probs < hi if i < bins - 1 else probs <= hi)
+        if not np.any(mask):
+            continue
+        conf = probs[mask].mean()
+        acc = labels[mask].mean()
+        ece += np.abs(acc - conf) * (mask.sum() / labels.size)
+    return float(ece), brier
     
 from torch_geometric.utils import add_self_loops
-def build_edge_attr(data):
-    edge_attr = data.dist.float()
-    if args.use_alpha_channel and hasattr(data, 'alpha'):
-        edge_attr = torch.cat([edge_attr, data.alpha.float()], dim=1)
-    return edge_attr
+def current_radius(epoch):
+    if args.radius_start <= 0 or args.radius_end <= 0:
+        return None
+    if args.epoch <= 1:
+        return args.radius_end
+    progress = (epoch - args.start_epoch) / max(args.epoch - 1, 1)
+    progress = max(0.0, min(1.0, progress))
+    return args.radius_start + (args.radius_end - args.radius_start) * progress
+
+
+def build_graph_inputs(data, epoch=None):
+    edge_index = data.edge_index
+    alpha = data.alpha.float() if hasattr(data, 'alpha') else None
+
+    radius = current_radius(epoch) if epoch is not None else None
+    if radius is not None:
+        src = edge_index[0]
+        dst = edge_index[1]
+        pos = data.x[:, -3:].float()
+        d = (pos[src] - pos[dst]).square().sum(dim=1).sqrt()
+        mask = d <= radius
+        if mask.sum() > 0:
+            edge_index = edge_index[:, mask]
+            edge_attr = edge_attr[mask]
+            if alpha is not None:
+                alpha = alpha[mask]
+
+    if args.use_alpha_channel and alpha is not None:
+        edge_attr = torch.cat([edge_attr, alpha], dim=1)
+    return edge_index, edge_attr
+
 
 
 def update_input_data(data, pred):
@@ -551,7 +675,7 @@ def update_input_data(data, pred):
 
 
 
-def train():
+def train(epoch):
     model.train()
     total_reward = 0.0
     total_loss1 = 0
@@ -580,8 +704,8 @@ def train():
                     ed = ((idx + 1) * flexible_len) // args.atomwise
                     atom_idx = all_atom_idx[st:ed]
                     optimizer.zero_grad()
-                    edge_attr = build_edge_attr(data)
-                    pred = model(data.x.to(device).float(), data.edge_index.to(device), edge_attr)[atom_idx]
+                    edge_index, edge_attr = build_graph_inputs(data, epoch)
+                    pred = model(data.x.to(device).float(), edge_index.to(device), edge_attr)[atom_idx]
                     pred = _dir_2_coor(pred, args.step_len)
                     loss = loss_op(pred.to(device).float(), data.y[atom_idx])
                     avg_loss += loss.item()
@@ -595,14 +719,19 @@ def train():
             optimizer.zero_grad()
             if args.flexible:
                 torsion_node = None
+                rank_logit = None
                 if args.model_type != 'Net_coor_cent':
                     if args.model_type == 'Net_coor_torsion':
-                        edge_attr = build_edge_attr(data)
-                        pred_all, torsion_node = model(data.x.to(device).float(), data.edge_index, edge_attr)
+                        edge_index, edge_attr = build_graph_inputs(data, epoch)
+                        pred_all, torsion_node = model(data.x.to(device).float(), edge_index, edge_attr)
+                        pred = pred_all[data.flexible_idx.bool()]
+                    elif args.model_type == 'Net_coor_two_stage':
+                        edge_index, edge_attr = build_graph_inputs(data, epoch)
+                        pred_all, rank_logit = model(data.x.to(device).float(), edge_index, edge_attr, data.batch if hasattr(data, 'batch') else None)
                         pred = pred_all[data.flexible_idx.bool()]
                     else:
-                        edge_attr = build_edge_attr(data)
-                        pred = model(data.x.to(device).float(), data.edge_index, edge_attr)[data.flexible_idx.bool()]
+                        edge_index, edge_attr = build_graph_inputs(data, epoch)
+                        pred = model(data.x.to(device).float(), edge_index, edge_attr)[data.flexible_idx.bool()]
                     
                 
                     
@@ -631,8 +760,8 @@ def train():
                     length = data.y.square().sum(1).sqrt().reshape(pred.size()[0],1)
                     loss = loss_op(pred, length)
                 elif args.model_type == 'Net_coor_cent':
-                    edge_attr = build_edge_attr(data)
-                    pred = model(data.x, data.edge_index, edge_attr, data.batch, data.flexible_idx.bool())
+                    edge_index, edge_attr = build_graph_inputs(data, epoch)
+                    pred = model(data.x, edge_index, edge_attr, data.batch, data.flexible_idx.bool())
                     y = global_mean_pool(data.y, data.batch[data.flexible_idx.bool()])
                     loss = loss_op(pred, y)
                 elif args.hinge != 0:
@@ -646,12 +775,15 @@ def train():
                     target = data.y.to(device).float()
                     torsion_node = torsion_node if args.model_type == 'Net_coor_torsion' else None
                     loss = geopronet_loss(data, pred.to(device).float(), target, data.flexible_idx.bool(), torsion_node=torsion_node)
-
+                    if args.model_type == 'Net_coor_two_stage':
+                        rank_target = ranking_targets_from_displacement(data, target, data.flexible_idx.bool())
+                        rank_loss = rank_loss_op(rank_logit.view(-1), rank_target.view(-1))
+                        loss = loss + args.lambda_rank * rank_loss
 
 
             else:
-                edge_attr = build_edge_attr(data)
-                pred = model(data.x, data.edge_index, edge_attr)
+                edge_index, edge_attr = build_graph_inputs(data, epoch)
+                pred = model(data.x, edge_index, edge_attr)
                 loss = loss_op(pred, data.y)
             if args.loss == 'CosineEmbeddingLoss':
                 total_loss += loss.item() / pred.size()[0] * args.batch_size
@@ -721,6 +853,8 @@ def test(loader, epoch):
     torsion_count = 0
     clash_rate_sum = 0.0
     clash_penalty_sum = 0.0
+    rank_labels = []
+    rank_probs = []
 
     pbar = tqdm(total=test_loader_size)
     pbar.set_description('Testing poses...')
@@ -748,22 +882,26 @@ def test(loader, epoch):
         if args.flexible:
             if args.model_type != 'Net_coor_cent':
                 if args.model_type == 'Net_coor_torsion':
-                    edge_attr = build_edge_attr(data.to(device))
-                    out_all, torsion_node = model(data.x.to(device).float(), data.edge_index.to(device), edge_attr)
+                    edge_index, edge_attr = build_graph_inputs(data.to(device), epoch)
+                    out_all, torsion_node = model(data.x.to(device).float(), edge_index.to(device), edge_attr)
+                    out = out_all[data.flexible_idx.bool()]
+                elif args.model_type == 'Net_coor_two_stage':
+                    torsion_node = None
+                    edge_index, edge_attr = build_graph_inputs(data.to(device), epoch)
+                    out_all, rank_logit = model(data.x.to(device).float(), edge_index.to(device), edge_attr, data.batch.to(device) if hasattr(data, 'batch') else None)
                     out = out_all[data.flexible_idx.bool()]
                 else:
                     torsion_node = None
-                    edge_attr = build_edge_attr(data.to(device))
-                    out = model(data.x.to(device).float(), data.edge_index.to(device), edge_attr)[data.flexible_idx.bool()]
-                
+                    edge_index, edge_attr = build_graph_inputs(data.to(device), epoch)
+                    out = model(data.x.to(device).float(), edge_index.to(device), edge_attr)[data.flexible_idx.bool()]
                                 
                 
                 #out = _dir_2_coor(out, args.step_len)
                 #out = _dir_2_coor2(out, args.step_len)
             if args.class_dir:
                 #y = data.y[data.flexible_idx.bool()].gt(0).long().to(device)
-                edge_attr = build_edge_attr(data.to(device))
-                y =  model(data.x.to(device), data.edge_index.to(device), edge_attr)[data.flexible_idx.bool()]
+                edge_index, edge_attr = build_graph_inputs(data.to(device), epoch)
+                y =  model(data.x.to(device), edge_index.to(device), edge_attr)[data.flexible_idx.bool()]
                 y = y[:, 0] * 4 + y[:, 1] * 2 + y[:, 2]
                 loss = loss_op(out, y)
                 for i in range(8):
@@ -779,8 +917,8 @@ def test(loader, epoch):
                 loss = loss_op(out, length)
                 out = data.y.to(device)
             elif args.model_type == 'Net_coor_cent':
-                edge_attr = build_edge_attr(data.to(device))
-                pred = model(data.x.to(device), data.edge_index.to(device), edge_attr, data.batch.to(device), data.flexible_idx.bool().to(device)).cpu()
+                edge_index, edge_attr = build_graph_inputs(data.to(device), epoch)
+                pred = model(data.x.to(device), edge_index.to(device), edge_attr, data.batch.to(device), data.flexible_idx.bool().to(device)).cpu()
                 y = global_mean_pool(data.y, data.batch[data.flexible_idx.bool()])
                 loss = loss_op(pred, y)
                 out = pred.repeat(num_flexible_atoms, 1)
@@ -799,6 +937,12 @@ def test(loader, epoch):
                     data.flexible_idx.bool().to(device),
                     torsion_node=torsion_node,
                 )
+                if args.model_type == 'Net_coor_two_stage':
+                    rank_target = ranking_targets_from_displacement(data.to(device), target, data.flexible_idx.bool().to(device))
+                    r_loss = rank_loss_op(rank_logit.view(-1), rank_target.view(-1))
+                    loss = loss + args.lambda_rank * r_loss
+                    rank_labels.extend(rank_target.detach().cpu().tolist())
+                    rank_probs.extend(torch.sigmoid(rank_logit).detach().cpu().tolist())
                 pred_clean = torch.nan_to_num(out.to(device).float(), nan=0.0, posinf=0.0, neginf=0.0)
                 target_clean = torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0)
                 flex_mask = data.flexible_idx.bool().to(device)
@@ -831,8 +975,8 @@ def test(loader, epoch):
 
 
         else: # not flexible
-            edge_attr = build_edge_attr(data.to(device))
-            out = model(data.x.to(device), data.edge_index.to(device), edge_attr)
+            edge_index, edge_attr = build_graph_inputs(data.to(device), epoch)
+            out = model(data.x.to(device), edge_index.to(device), edge_attr)
             loss = loss_op(out, data.y.to(device)) 
             rmsds = F.mse_loss(data.y, out.cpu()[data.flexible_idx.bool()], reduction='sum').item()
             total_rmsd += math.sqrt(rmsds / num_flexible_atoms)
@@ -913,6 +1057,15 @@ def test(loader, epoch):
         "torsion_angular_rmse_rad": (float(math.sqrt(torsion_sq_err_sum / torsion_count)) if torsion_count > 0 else None),
     }
 
+    if len(rank_labels) > 1 and len(set(rank_labels)) > 1:
+        metrics["rank_auc"] = float(sk_metrics.roc_auc_score(rank_labels, rank_probs))
+        ece, brier = rank_calibration_metrics(rank_labels, rank_probs)
+        metrics["rank_ece"] = ece
+        metrics["rank_brier"] = brier
+    else:
+        metrics["rank_auc"] = None
+        metrics["rank_ece"] = None
+        metrics["rank_brier"] = None
     per_complex = []
     for jj in range(diff_complex):
         denom = max(num_pose_per_pdb[jj], 1)
@@ -936,7 +1089,7 @@ min_rmsd = 10.0
 best_epoch = 0
 
 for epoch in range(args.start_epoch, args.start_epoch + args.epoch):
-    loss1 = train()
+    loss1 = train(epoch)
     print(f"Train Loss: {loss1}")
     #loss2, rmsd, rmsd_in = test(test_loader, epoch)
     #print(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd}")
@@ -945,6 +1098,9 @@ for epoch in range(args.start_epoch, args.start_epoch + args.epoch):
     if scheduler is not None:
         scheduler.step(loss2)
     current_lr = optimizer.param_groups[0]["lr"]
+    if adaptive_loss is not None:
+        for key, param in adaptive_loss.log_vars.items():
+            eval_metrics[f"adaptive_weight_{key}"] = float(torch.exp(-param).detach().cpu().item())
     rmsd = eval_metrics["avg_rmsd_per_complex_A"]
     rmsd_in = eval_metrics["avg_input_rmsd_per_complex_A"]
     print(f"Epoch: {epoch} Train Loss: {loss1} Validation Loss: {loss2}  Avg RMSD: {rmsd} SR@2A: {eval_metrics['sr_2a']} SR@5A: {eval_metrics['sr_5a']} LR: {current_lr}")
