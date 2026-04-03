@@ -140,3 +140,30 @@ class Net_coor_torsion(_GeoBase):
         coor_delta = self.out(h)
         torsion_node = self.torsion_head(h).squeeze(-1)
         return coor_delta, torsion_node
+
+class Net_coor_two_stage(_GeoBase):
+    """Coarse global shift + local refinement + pose-ranking head."""
+    def __init__(self, in_channels, args):
+        super().__init__(in_channels, args, out_channels=3)
+        hidden = args.d_graph_layer
+        self.coarse_head = nn.Sequential(
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 3),
+        )
+        self.rank_head = nn.Sequential(
+            nn.Linear(hidden, hidden // 2),
+            nn.ReLU(),
+            nn.Linear(hidden // 2, 1),
+        )
+
+    def forward(self, x, edge_index, edge_attr, batch=None, flexible_idx=None):
+        h = self.encode(x, edge_index, edge_attr)
+        local_delta = self.out(h)
+        if batch is None:
+            batch = x.new_zeros((x.size(0),), dtype=torch.long)
+        pooled = global_mean_pool(h, batch)
+        coarse_shift = self.coarse_head(pooled)
+        rank_logit = self.rank_head(pooled).squeeze(-1)
+        final_delta = local_delta + coarse_shift[batch]
+        return final_delta, rank_logit
