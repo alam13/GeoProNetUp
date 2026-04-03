@@ -20,8 +20,8 @@ def main():
     import torch
     from torch_geometric.data import DataLoader
     from dataset import PDBBindCoor
-    from engine.eval_loop import evaluate
-    from engine.train_loop import train_one_epoch
+    from eval_loop import evaluate
+    from train_loop import train_one_epoch
     from losses.geometric_losses import AdaptiveGeoLoss
     from models.factory import build_model
 
