@@ -17,6 +17,23 @@ from model import Net_coor
 SPACE = 100
 BOND_TH = 6.0
 
+def _read_optional_scalar(np_file_handle):
+    """
+    Attempt to read one extra scalar payload from label stream.
+    Returns None when payload is absent or malformed.
+    """
+    try:
+        arr = np.load(np_file_handle)
+    except Exception:
+        return None
+    arr = np.asarray(arr).reshape(-1)
+    if arr.size == 0:
+        return None
+    try:
+        return float(arr[0])
+    except Exception:
+        return None
+
 def _row_idx_from_node_index(node_index, num_edges):
     """
     Convert per-node cumulative edge counts (without leading 0) to row indices.
@@ -397,6 +414,7 @@ class PDBBindCoor(InMemoryDataset):
                     labels = np.load(label_file)# * 100
                     bonds = np.load(label_file)# * 100
                     pdb = np.load(label_file)
+                    pose_rmsd = _read_optional_scalar(label_file)
 
 
                     indptr = torch.LongTensor(indptr)
@@ -434,7 +452,8 @@ class PDBBindCoor(InMemoryDataset):
                     # data.flexible_idy = flexible_idy
                     data.flexible_len = flexible_len
 
-
+                    if pose_rmsd is not None:
+                        data.pose_rmsd = torch.tensor([pose_rmsd], dtype=torch.float)
                     if self.pre_filter is not None and not self.pre_filter(data):
                         continue
 
@@ -1057,7 +1076,7 @@ class PDBBindScreen2(InMemoryDataset):
                     labels = np.load(label_file) # label and num of flexible
                     flexible = int(labels[1])
                     bonds = np.load(label_file)
-
+                    pose_rmsd = _read_optional_scalar(label_file)
 
                     x = torch.Tensor(features)
                     dist = torch.tensor(dist, dtype=torch.float)
@@ -1148,7 +1167,9 @@ class PDBBindScreen2(InMemoryDataset):
                         data.lig_idx = torch.tensor([energy], dtype=torch.int)
                     bonds = torch.Tensor(bonds)
                     data.bonds = bonds
-
+                    if pose_rmsd is not None:
+                        data.pose_rmsd = torch.tensor([pose_rmsd], dtype=torch.float)
+                        
                     if self.pre_filter is not None and not self.pre_filter(data):
                         continue
 
