@@ -1,0 +1,20 @@
+name: regression-gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run regression gate on golden fixture
+        run: |
+          python scripts/ci_regression_gate.py \
+            --baseline_snapshot ci/baselines/baseline_example.json \
+            --candidate_metrics_jsonl ci/golden/candidate_metrics.jsonl \
+            --thresholds_json configs/phase3/regression_thresholds.json
