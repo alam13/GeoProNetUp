@@ -483,6 +483,15 @@ class PDBBindCoor(InMemoryDataset):
                     # e =
 
                     # only flexible has
+                    flex_count = int(flexible_idx.sum().item())
+                    if y.dim() == 1:
+                        y = y.reshape(-1, 1)
+                    if y.size(0) != flex_count:
+                        if y.size(0) > flex_count:
+                            y = y[:flex_count]
+                        else:
+                            pad_rows = flex_count - y.size(0)
+                            y = torch.cat([y, torch.zeros((pad_rows, y.size(1)), dtype=y.dtype)], dim=0)
                     y = y - x[flexible_idx, -3:]
                     data = Data(x=x, edge_index=edge_index, y=y)
                     # data.rmsd = torch.tensor([rmsds[idx]], dtype=torch.float)
@@ -495,6 +504,8 @@ class PDBBindCoor(InMemoryDataset):
                     data.flexible_idx = flexible_idx
                     # data.flexible_idy = flexible_idy
                     data.flexible_len = flexible_len
+                    if y.dim() == 2 and y.size(1) > 3:
+                        data.pose_rmsd = y[:, 3].abs().mean().reshape(1)
                     if y.dim() == 2 and y.size(1) > 3:
                         data.pose_rmsd = y[:, 3].abs().mean().reshape(1)
                     if y.dim() == 2 and y.size(1) > 3:
