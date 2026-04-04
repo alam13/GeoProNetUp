@@ -1,0 +1,9 @@
+{
+  "sr_2a": {"mode": "max_drop", "margin": 0.01},
+  "sr_5a": {"mode": "max_drop", "margin": 0.005},
+  "rmsd_mean_A": {"mode": "max_increase", "margin": 0.15},
+  "clash_rate": {"mode": "max_increase", "margin": 0.01},
+  "rank_auc": {"mode": "max_drop", "margin": 0.01},
+  "rank_ece": {"mode": "max_increase", "margin": 0.01},
+  "rank_brier": {"mode": "max_increase", "margin": 0.01}
+}
