@@ -28,8 +28,22 @@ def main():
     p.add_argument("--output_dir", default="ci/baselines")
     args = p.parse_args()
 
-    model_hash = _sha256_file(args.model_file)
-    baseline_metrics = _last_jsonl(args.metrics_jsonl)
+    metrics_path = Path(args.metrics_jsonl)
+    if not metrics_path.exists():
+        raise SystemExit(
+            f"Metrics file not found: {metrics_path}. "
+            "Run training first and point --metrics_jsonl to the emitted metrics JSONL."
+        )
+
+    model_path = Path(args.model_file)
+    if not model_path.exists():
+        raise SystemExit(
+            f"Model file not found: {model_path}. "
+            "Ensure training wrote best_model.pt to this location (for config training, check --output_dir)."
+        )
+
+    model_hash = _sha256_file(model_path)
+    baseline_metrics = _last_jsonl(metrics_path)
     version_key = hashlib.sha256(f"{args.data_id}:{model_hash}".encode("utf-8")).hexdigest()[:16]
 
     payload = {
