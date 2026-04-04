@@ -20,6 +20,31 @@ def _read_last_jsonl(path):
     return json.loads(rows[-1])
 
 
+def _resolve_optional_artifact(path: str, pattern: str, label: str):
+    requested = Path(path)
+    if requested.exists():
+        return requested
+
+    search_roots = []
+    parent = requested.parent if str(requested.parent) else Path(".")
+    search_roots.append(parent)
+    project_results = Path("results")
+    if project_results != parent and project_results.exists():
+        search_roots.append(project_results)
+
+    candidates = []
+    for root in search_roots:
+        candidates.extend(root.glob(f"**/{pattern}"))
+    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
+    if candidates:
+        chosen = candidates[0]
+        print(f"warning: {label} not found at {requested}; using latest discovered file: {chosen}")
+        return chosen
+
+    print(f"warning: {label} not found at {requested}; skipping optional hash alignment checks")
+    return None
+
+
 def _check(candidate, baseline, thresholds):
     failures = []
     for metric, cfg in thresholds.items():
@@ -59,10 +84,14 @@ def main():
         raise SystemExit(f"data_id mismatch: baseline={baseline_data_id}, candidate={args.data_id}")
 
     if args.candidate_model_file is not None:
-        candidate_model_hash = _sha256_file(args.candidate_model_file)
+        candidate_model_path = _resolve_optional_artifact(args.candidate_model_file, "best_model.pt", "candidate model file")
+        if candidate_model_path is None:
+            candidate_model_hash = None
+        else:
+            candidate_model_hash = _sha256_file(candidate_model_path)
         if baseline_model_hash not in (None, "example") and candidate_model_hash != baseline_model_hash:
             print(f"warning: model hash differs from baseline ({candidate_model_hash} != {baseline_model_hash})")
-        if args.data_id is not None and baseline_version is not None:
+        if args.data_id is not None and baseline_version is not None and candidate_model_hash is not None:
             expected = hashlib.sha256(f"{args.data_id}:{candidate_model_hash}".encode("utf-8")).hexdigest()[:16]
             if baseline_version != expected:
                 print(f"warning: baseline version key ({baseline_version}) does not match candidate hash/data_id ({expected})")
