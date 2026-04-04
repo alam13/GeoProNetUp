@@ -99,7 +99,9 @@ def main():
             }
         )
 
-    Path(args.output_json).write_text(json.dumps(manifest, indent=2) + "\n")
+    output_path = Path(args.output_json)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(manifest, indent=2) + "\n")
     print(f"Wrote {len(manifest['splits'])} rows to {args.output_json}")
 
 
