@@ -79,6 +79,50 @@ def _compute_edge_alpha(edge_index, coords):
         alpha[e, 0] = torch.acos(cosang)
     return alpha
 
+def _read_coor_label_record(label_file):
+    """
+    Read one coordinate-label record without drifting file offsets.
+    Expected payload count per record is 4, but field order can vary between
+    dumps (notably bonds/pdb position).
+    """
+    payloads = [np.load(label_file, allow_pickle=True) for _ in range(4)]
+
+    pdb = None
+    bonds = None
+    flexible_len = None
+    labels = None
+
+    for arr in payloads:
+        arr_np = np.asarray(arr)
+        if arr_np.dtype.kind in {"U", "S", "O"} and arr_np.size > 0 and pdb is None:
+            pdb = arr
+            continue
+        if arr_np.ndim == 2 and arr_np.shape[1] == 2 and bonds is None:
+            bonds = arr
+            continue
+        if flexible_len is None and arr_np.size == 1:
+            flexible_len = arr
+            continue
+        if labels is None:
+            labels = arr
+
+    # Safe fallback if heuristic matching is incomplete.
+    if flexible_len is None:
+        flexible_len = payloads[0]
+    if labels is None:
+        labels = payloads[1]
+    if bonds is None:
+        # pick first numeric 2D payload
+        for arr in payloads:
+            arr_np = np.asarray(arr)
+            if arr_np.ndim == 2 and arr_np.dtype.kind in {"i", "u", "f"}:
+                bonds = arr
+                break
+    if pdb is None:
+        pdb = payloads[-1]
+
+    return flexible_len, labels, bonds, pdb
+
 
 class PDBBind(InMemoryDataset):
 
@@ -410,10 +454,7 @@ class PDBBindCoor(InMemoryDataset):
                     indptr = ast.literal_eval(graphs[3*idx])
                     indices = ast.literal_eval(graphs[3*idx+1])
                     dist = ast.literal_eval(graphs[3*idx+2])
-                    flexible_len = np.load(label_file)# * 100
-                    labels = np.load(label_file)# * 100
-                    bonds = np.load(label_file)# * 100
-                    pdb = np.load(label_file)
+                    flexible_len, labels, bonds, pdb = _read_coor_label_record(label_file)
                     pose_rmsd = _read_optional_scalar(label_file)
 
 
@@ -427,7 +468,10 @@ class PDBBindCoor(InMemoryDataset):
 
                     x = torch.Tensor(features)
                     y = torch.Tensor(labels)
-                    bonds = torch.Tensor(bonds)
+                    bonds_np = np.asarray(bonds)
+                    if bonds_np.dtype.kind not in {"i", "u", "f"}:
+                        raise TypeError(f"Invalid bonds payload dtype {bonds_np.dtype}; check label file field order.")
+                    bonds = torch.Tensor(bonds_np)
                     dist = dist.reshape(dist.size()[0], -1)
                     # flexible_idx = torch.tensor([(F.mse_loss(x[i][-3:], y[i]).item() > 0.000000001) for i in range(y.size()[0])])
                     flexible_idx = torch.arange(features.shape[0], dtype=torch.long) < int(flexible_len[0])
@@ -451,6 +495,8 @@ class PDBBindCoor(InMemoryDataset):
                     data.flexible_idx = flexible_idx
                     # data.flexible_idy = flexible_idy
                     data.flexible_len = flexible_len
+                    if y.dim() == 2 and y.size(1) > 3:
+                        data.pose_rmsd = y[:, 3].abs().mean().reshape(1)
                     if y.dim() == 2 and y.size(1) > 3:
                         data.pose_rmsd = y[:, 3].abs().mean().reshape(1)
 
@@ -1170,6 +1216,8 @@ class PDBBindScreen2(InMemoryDataset):
                         data.lig_idx = torch.tensor([energy], dtype=torch.int)
                     bonds = torch.Tensor(bonds)
                     data.bonds = bonds
+                    if labels.shape[0] > 2:
+                        data.pose_rmsd = torch.tensor([float(labels[2])], dtype=torch.float)
                     if labels.shape[0] > 2:
                         data.pose_rmsd = torch.tensor([float(labels[2])], dtype=torch.float)
                     if pose_rmsd is not None:
