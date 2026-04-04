@@ -85,7 +85,16 @@ def _read_coor_label_record(label_file):
     Expected payload count per record is 4, but field order can vary between
     dumps (notably bonds/pdb position).
     """
-    payloads = [np.load(label_file, allow_pickle=True) for _ in range(4)]
+    payloads = []
+    for _ in range(4):
+        try:
+            payloads.append(np.load(label_file, allow_pickle=True))
+        except EOFError:
+            break
+
+    if len(payloads) < 3:
+        # Caller can stop iterating this file safely.
+        return None
 
     pdb = None
     bonds = None
@@ -366,22 +375,18 @@ class PDBBind_test(InMemoryDataset):
                    os.path.join(self.processed_dir, 'test.pt'))
 
 
-class PDBBindCoor(InMemoryDataset):
+class PDBBind(InMemoryDataset):
 
-    def __init__(self, root, subset=False, split='train', data_type='coor2', transform=None,
+    def __init__(self, root, subset=False, split='train', transform=None,
                  pre_transform=None, pre_filter=None):
         self.subset = subset
-        self.split = split
-        self.data_type = data_type
+        # super(PDBBind, self).__init__(root, transform, pre_transform, pre_filter)
         super().__init__(root, transform, pre_transform, pre_filter)
         path = os.path.join(self.processed_dir, f'{split}.pt')
         self.data, self.slices = torch.load(path, weights_only=False)
 
     @property
     def raw_file_names(self):
-        if self.data_type == 'autodock':
-            return ['test']
-        return [self.split]
         return [
             'train', 'test'
         ]
@@ -394,41 +399,8 @@ class PDBBindCoor(InMemoryDataset):
 
     @property
     def processed_file_names(self):
-        if self.data_type == 'autodock':
-            return ['test.pt']
-        return [self.split+'.pt']
         return ['train.pt', 'test.pt']
-
-    # TODO: implement after uploading the entire dataset somewhere
-    def download(self):
-        print('Hello Download')
-        pass
-
-    def process(self):
-        if self.data_type == 'autodock':
-            splits = ['test']
-        else:
-            splits = ['train', 'test']
-        splits = [self.split]
-        for split in splits:
-
-            dataset_dir = os.path.join(self.raw_dir, f'{split}')
-            files_num = len(
-                glob.glob(os.path.join(dataset_dir, '*_data-G.json')))
-
-            data_list = []
-            graph_idx = 0
-
-            pbar = tqdm(total=files_num)
-            pbar.set_description(f'Processing {split} dataset')
-            print(f'dataset_dir: {dataset_dir}')
-        
-
-            for f in range(files_num):
-
-                with open(os.path.join(dataset_dir, f'{f}_data-G.json')) as gf:
-                    graphs = gf.readlines()
-                num_graphs_per_file = len(graphs)//3
+@@ -371,90 +425,104 @@ class PDBBindCoor(InMemoryDataset):
 
                 pbar.total = num_graphs_per_file * files_num
                 pbar.refresh()
@@ -454,8 +426,11 @@ class PDBBindCoor(InMemoryDataset):
                     indptr = ast.literal_eval(graphs[3*idx])
                     indices = ast.literal_eval(graphs[3*idx+1])
                     dist = ast.literal_eval(graphs[3*idx+2])
-                    flexible_len, labels, bonds, pdb = _read_coor_label_record(label_file)
-                    pose_rmsd = _read_optional_scalar(label_file)
+                    
+                    record = _read_coor_label_record(label_file)
+                    if record is None:
+                        break
+                    flexible_len, labels, bonds, pdb = record
 
 
                     indptr = torch.LongTensor(indptr)
@@ -468,12 +443,14 @@ class PDBBindCoor(InMemoryDataset):
 
                     x = torch.Tensor(features)
                     y = torch.Tensor(labels)
+                    
                     bonds_np = np.asarray(bonds)
                     if bonds_np.dtype.kind not in {"i", "u", "f"}:
                         raise TypeError(f"Invalid bonds payload dtype {bonds_np.dtype}; check label file field order.")
                     bonds = torch.Tensor(bonds_np)
                     dist = dist.reshape(dist.size()[0], -1)
                     # flexible_idx = torch.tensor([(F.mse_loss(x[i][-3:], y[i]).item() > 0.000000001) for i in range(y.size()[0])])
+                    
                     flexible_idx = torch.arange(features.shape[0], dtype=torch.long) < int(flexible_len[0])
                     # flexible_idy = torch.tensor(torch.LongTensor(range(y.size()[0])) < flexible_len[0])
                     flexible_len = torch.tensor(flexible_len)
@@ -506,14 +483,8 @@ class PDBBindCoor(InMemoryDataset):
                     data.flexible_len = flexible_len
                     if y.dim() == 2 and y.size(1) > 3:
                         data.pose_rmsd = y[:, 3].abs().mean().reshape(1)
-                    if y.dim() == 2 and y.size(1) > 3:
-                        data.pose_rmsd = y[:, 3].abs().mean().reshape(1)
-                    if y.dim() == 2 and y.size(1) > 3:
-                        data.pose_rmsd = y[:, 3].abs().mean().reshape(1)
 
 
-                    if pose_rmsd is not None:
-                        data.pose_rmsd = torch.tensor([pose_rmsd], dtype=torch.float)
                     if self.pre_filter is not None and not self.pre_filter(data):
                         continue
 
