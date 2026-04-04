@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
-from engine.seed_report import summarize_seed_runs, summary_to_json, write_markdown_summary
+from seed_report import summarize_seed_runs, summary_to_json, write_markdown_summary
 
 
 ABLATIONS = {
