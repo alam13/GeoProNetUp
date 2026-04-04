@@ -1,0 +1,14 @@
+{
+  "version": "example_v1",
+  "data_id": "golden_pose_set_v1",
+  "model_sha256": "example",
+  "metrics": {
+    "sr_2a": 0.40,
+    "sr_5a": 0.80,
+    "rmsd_mean_A": 2.20,
+    "clash_rate": 0.12,
+    "rank_auc": 0.70,
+    "rank_ece": 0.08,
+    "rank_brier": 0.19
+  }
+}
