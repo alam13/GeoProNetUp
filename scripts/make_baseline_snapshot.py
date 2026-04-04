@@ -20,6 +20,24 @@ def _last_jsonl(path):
     return json.loads(rows[-1])
 
 
+def _resolve_artifact(path: Path, pattern: str, label: str) -> Path:
+    if path.exists():
+        return path
+
+    search_root = path.parent if str(path.parent) else Path(".")
+    candidates = sorted(search_root.glob(f"**/{pattern}"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if candidates:
+        chosen = candidates[0]
+        print(f"{label} not found at {path}; using latest discovered file: {chosen}")
+        return chosen
+
+    raise SystemExit(
+        f"{label} not found: {path}. "
+        f"Run training first and point to the emitted {label.lower()} "
+        "(for train_from_config: <output_dir>/metrics.jsonl and <output_dir>/best_model.pt)."
+    )
+
+
 def main():
     p = argparse.ArgumentParser(description="Create versioned baseline metrics snapshot")
     p.add_argument("--metrics_jsonl", required=True)
@@ -28,19 +46,8 @@ def main():
     p.add_argument("--output_dir", default="ci/baselines")
     args = p.parse_args()
 
-    metrics_path = Path(args.metrics_jsonl)
-    if not metrics_path.exists():
-        raise SystemExit(
-            f"Metrics file not found: {metrics_path}. "
-            "Run training first and point --metrics_jsonl to the emitted metrics JSONL."
-        )
-
-    model_path = Path(args.model_file)
-    if not model_path.exists():
-        raise SystemExit(
-            f"Model file not found: {model_path}. "
-            "Ensure training wrote best_model.pt to this location (for config training, check --output_dir)."
-        )
+    metrics_path = _resolve_artifact(Path(args.metrics_jsonl), "metrics.jsonl", "Metrics file")
+    model_path = _resolve_artifact(Path(args.model_file), "best_model.pt", "Model file")
 
     model_hash = _sha256_file(model_path)
     baseline_metrics = _last_jsonl(metrics_path)
