@@ -400,7 +400,7 @@ class PDBBind(InMemoryDataset):
     @property
     def processed_file_names(self):
         return ['train.pt', 'test.pt']
-@@ -371,90 +425,104 @@ class PDBBindCoor(InMemoryDataset):
+class PDBBindCoor(InMemoryDataset):
 
                 pbar.total = num_graphs_per_file * files_num
                 pbar.refresh()
