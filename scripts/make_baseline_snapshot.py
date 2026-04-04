@@ -24,8 +24,17 @@ def _resolve_artifact(path: Path, pattern: str, label: str) -> Path:
     if path.exists():
         return path
 
-    search_root = path.parent if str(path.parent) else Path(".")
-    candidates = sorted(search_root.glob(f"**/{pattern}"), key=lambda p: p.stat().st_mtime, reverse=True)
+    search_roots = []
+    parent = path.parent if str(path.parent) else Path(".")
+    search_roots.append(parent)
+    project_results = Path("results")
+    if project_results != parent and project_results.exists():
+        search_roots.append(project_results)
+
+    candidates = []
+    for root in search_roots:
+        candidates.extend(root.glob(f"**/{pattern}"))
+    candidates = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
     if candidates:
         chosen = candidates[0]
         print(f"{label} not found at {path}; using latest discovered file: {chosen}")
@@ -34,7 +43,8 @@ def _resolve_artifact(path: Path, pattern: str, label: str) -> Path:
     raise SystemExit(
         f"{label} not found: {path}. "
         f"Run training first and point to the emitted {label.lower()} "
-        "(for train_from_config: <output_dir>/metrics.jsonl and <output_dir>/best_model.pt)."
+        "(for train_from_config defaults: results/modular_train/metrics.jsonl and "
+        "results/modular_train/best_model.pt; or set a custom --output_dir)."
     )
 
 
